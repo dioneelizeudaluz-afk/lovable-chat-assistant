@@ -1,41 +1,31 @@
 {
   "manifest_version": 3,
   "name": "Lovable Chat Assistant",
-  "version": "1.0.0",
-  "description": "Cliente de chat integrado para Lovable.dev - Versão Mobile",
+  "version": "2.0.0",
+  "description": "Cliente de chat para Lovable.dev com bloqueio de créditos",
   "permissions": [
     "activeTab",
     "cookies",
     "storage",
     "tabs",
-    "scripting"
+    "scripting",
+    "webRequest",
+    "webRequestBlocking"
   ],
   "host_permissions": [
     "https://*.lovable.dev/*",
     "https://api.lovable.dev/*",
     "https://lovable.dev/*",
-    "https://storage.googleapis.com/*",
-    "https://*.storage.googleapis.com/*",
-    "https://*.googleapis.com/*"
+    "*://*.lovable.dev/*",
+    "*://api.lovable.dev/*"
   ],
   "background": {
     "service_worker": "background.js"
   },
   "action": {
-    "default_popup": "popup.html",
-    "default_icon": {
-      "16": "icons/icon16.png",
-      "48": "icons/icon48.png",
-      "128": "icons/icon128.png"
-    }
-  },
-  "icons": {
-    "16": "icons/icon16.png",
-    "48": "icons/icon48.png",
-    "128": "icons/icon128.png"
+    "default_popup": "popup.html"
   },
   "content_security_policy": {
     "extension_pages": "script-src 'self'; object-src 'self'"
-  },
-  "minimum_chrome_version": "88"
+  }
 }
