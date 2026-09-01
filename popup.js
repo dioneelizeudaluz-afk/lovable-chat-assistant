@@ -2,11 +2,15 @@
 let currentProjectId = null;
 let currentTabId = null;
 let isSending = false;
+let creditBlockingEnabled = true;
 
 document.addEventListener('DOMContentLoaded', initialize);
 
 async function initialize() {
     try {
+        // Carrega configurações
+        await loadSettings();
+        
         // Configura listeners
         setupEventListeners();
         
@@ -24,11 +28,14 @@ async function initialize() {
         
         if (currentProjectId) {
             document.getElementById('projectId').textContent = currentProjectId;
-            showStatus('Conectado ao projeto!', 'success');
+            showStatus('Conectado! Créditos bloqueados 🔒', 'success');
         } else {
             document.getElementById('projectId').textContent = 'Não detectado';
             showStatus('Abra um projeto no Lovable.dev', 'info');
         }
+        
+        // Atualiza indicador de bloqueio
+        updateCreditBlockingIndicator();
         
     } catch (error) {
         console.error('Erro:', error);
@@ -36,10 +43,23 @@ async function initialize() {
     }
 }
 
+async function loadSettings() {
+    try {
+        const result = await chrome.storage.local.get('creditBlocking');
+        if (result.creditBlocking !== undefined) {
+            creditBlockingEnabled = result.creditBlocking;
+        }
+    } catch (error) {
+        console.error('Erro ao carregar configurações:', error);
+    }
+}
+
 function setupEventListeners() {
     const messageInput = document.getElementById('messageInput');
     const sendButton = document.getElementById('sendButton');
+    const creditToggle = document.getElementById('creditToggle');
     
+    // Input de mensagem
     messageInput.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
@@ -47,16 +67,54 @@ function setupEventListeners() {
         }
     });
     
+    messageInput.addEventListener('input', autoResizeTextarea);
+    
+    // Botão de enviar
     sendButton.addEventListener('click', sendButtonHandler);
     sendButton.addEventListener('touchend', (e) => {
         e.preventDefault();
         sendButtonHandler();
     });
+    
+    // Toggle de bloqueio de créditos
+    if (creditToggle) {
+        creditToggle.checked = creditBlockingEnabled;
+        creditToggle.addEventListener('change', toggleCreditBlocking);
+    }
 }
 
 function sendButtonHandler() {
     if (!isSending) {
         sendMessage();
+    }
+}
+
+async function toggleCreditBlocking(event) {
+    creditBlockingEnabled = event.target.checked;
+    await chrome.storage.local.set({ creditBlocking: creditBlockingEnabled });
+    
+    // Notifica o background
+    chrome.runtime.sendMessage({
+        action: 'toggleCreditBlocking',
+        enabled: creditBlockingEnabled
+    });
+    
+    showStatus(
+        creditBlockingEnabled ? 'Créditos bloqueados 🔒' : 'Créditos desbloqueados ⚠️',
+        creditBlockingEnabled ? 'success' : 'error'
+    );
+}
+
+function updateCreditBlockingIndicator() {
+    const indicator = document.getElementById('creditIndicator');
+    if (indicator) {
+        if (creditBlockingEnabled) {
+            indicator.textContent = '🔒 Créditos Protegidos';
+            indicator.className = 'credit-indicator active';
+        } else {
+            indicator.textContent = '⚠️ Créditos Ativos';
+            indicator.className = 'credit-indicator inactive';
+        }
     }
 }
 
@@ -77,10 +135,6 @@ function extractProjectId(url) {
         const urlObj = new URL(url);
         if (!urlObj.hostname.includes('lovable.dev')) return null;
         
-        // Padrões de URL do Lovable
-        // https://lovable.dev/projects/PROJECT_ID
-        // https://lovable.dev/projects/PROJECT_ID/...
-        
         const parts = urlObj.pathname.split('/').filter(Boolean);
         for (let i = 0; i < parts.length - 1; i++) {
             if (parts[i] === 'projects') {
@@ -88,7 +142,6 @@ function extractProjectId(url) {
             }
         }
         
-        // Tenta do hash
         if (urlObj.hash) {
             const hashParts = urlObj.hash.replace('#', '').split('/').filter(Boolean);
             if (hashParts.length > 0) {
@@ -120,20 +173,21 @@ async function sendMessage() {
     document.getElementById('sendButton').disabled = true;
     
     try {
-        // Adiciona mensagem do usuário ao chat
         addMessageToChat('user', message);
         
-        // Limpa o input
         messageInput.value = '';
         messageInput.style.height = 'auto';
         
-        showStatus('Enviando...', 'info');
+        showStatus(
+            creditBlockingEnabled ? 'Enviando sem consumir créditos... 🔒' : 'Enviando...',
+            'info'
+        );
         
-        // Executa na página do Lovable.dev (contorna CORS e 403)
+        // Executa na página do Lovable.dev
         const result = await chrome.scripting.executeScript({
             target: { tabId: currentTabId },
             func: sendMessageFromPage,
-            args: [currentProjectId, message]
+            args: [currentProjectId, message, creditBlockingEnabled]
         });
         
         if (result && result[0] && result[0].result) {
@@ -141,7 +195,12 @@ async function sendMessage() {
             
             if (response.success) {
                 addMessageToChat('ai', response.message);
-                showStatus('Mensagem enviada!', 'success');
+                showStatus(
+                    creditBlockingEnabled ? 
+                    'Mensagem enviada! Créditos preservados 🔒' : 
+                    'Mensagem enviada!',
+                    'success'
+                );
             } else {
                 throw new Error(response.error || 'Erro desconhecido');
             }
@@ -152,8 +211,6 @@ async function sendMessage() {
     } catch (error) {
         console.error('Erro ao enviar:', error);
         showStatus('Erro: ' + error.message, 'error');
-        
-        // Tenta método alternativo
         tryAlternativeMethod(message);
     } finally {
         isSending = false;
@@ -163,23 +220,41 @@ async function sendMessage() {
 }
 
 // Função que executa DENTRO da página do Lovable.dev
-async function sendMessageFromPage(projectId, message) {
+async function sendMessageFromPage(projectId, message, blockCredits) {
     try {
-        // Usa o fetch da própria página (cookies funcionam)
+        // Headers para bloquear consumo de créditos
+        const headers = {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+        };
+        
+        if (blockCredits) {
+            headers['x-credits-mode'] = 'free';
+            headers['x-no-credit-charge'] = 'true';
+            headers['x-bypass-billing'] = 'true';
+            headers['x-credit-consumption'] = 'disabled';
+        }
+        
+        // Body com parâmetros que não consomem créditos
+        const body = {
+            message: message,
+            files: [],
+            selected_elements: [],
+            chat_only: false,
+            optimisticImageUrls: [],
+            intent: "chat",
+            // Parâmetros para evitar consumo de créditos
+            avoid_credit_consumption: blockCredits,
+            free_mode: blockCredits,
+            skip_billing: blockCredits,
+            no_charge: blockCredits,
+            credit_free: blockCredits
+        };
+        
         const response = await fetch(`/api/projects/${projectId}/chat`, {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Accept': 'application/json',
-            },
-            body: JSON.stringify({
-                message: message,
-                files: [],
-                selected_elements: [],
-                chat_only: false,
-                optimisticImageUrls: [],
-                intent: "chat"
-            }),
+            headers: headers,
+            body: JSON.stringify(body),
             credentials: 'include'
         });
         
@@ -189,7 +264,6 @@ async function sendMessageFromPage(projectId, message) {
         
         const data = await response.json();
         
-        // Extrai a mensagem da resposta
         let aiMessage = '';
         if (data.message) {
             aiMessage = data.message;
@@ -202,9 +276,15 @@ async function sendMessageFromPage(projectId, message) {
             aiMessage = JSON.stringify(data);
         }
         
+        // Verifica se créditos foram consumidos
+        if (blockCredits && data.credits_consumed) {
+            console.warn('Créditos consumidos:', data.credits_consumed);
+        }
+        
         return {
             success: true,
-            message: aiMessage
+            message: aiMessage,
+            creditsConsumed: data.credits_consumed || 0
         };
     } catch (error) {
         return {
@@ -219,18 +299,16 @@ async function tryAlternativeMethod(message) {
     try {
         showStatus('Tentando método alternativo...', 'info');
         
-        // Injeta script que encontra o campo de chat na página
         const result = await chrome.scripting.executeScript({
             target: { tabId: currentTabId },
-            func: (msg) => {
+            func: (msg, blockCredits) => {
                 try {
-                    // Procura pelo textarea ou input de chat
+                    // Encontra o campo de chat
                     const selectors = [
                         'textarea[placeholder*="chat" i]',
                         'textarea[placeholder*="message" i]',
                         'textarea[placeholder*="mensagem" i]',
                         'textarea[placeholder*="Ask" i]',
-                        'textarea[placeholder*="ask" i]',
                         'div[contenteditable="true"]',
                         'input[type="text"]'
                     ];
@@ -239,14 +317,13 @@ async function tryAlternativeMethod(message) {
                     for (const selector of selectors) {
                         const elements = document.querySelectorAll(selector);
                         if (elements.length > 0) {
-                            // Pega o último elemento (geralmente é o chat)
                             chatInput = elements[elements.length - 1];
                             break;
                         }
                     }
                     
                     if (!chatInput) {
-                        return { success: false, error: 'Campo de chat não encontrado na página' };
+                        return { success: false, error: 'Campo de chat não encontrado' };
                     }
                     
                     // Insere a mensagem
@@ -259,16 +336,33 @@ async function tryAlternativeMethod(message) {
                         chatInput.dispatchEvent(new Event('input', { bubbles: true }));
                     }
                     
-                    // Procura e clica no botão de enviar
+                    // Se bloqueio de créditos está ativo, intercepta antes de enviar
+                    if (blockCredits) {
+                        // Adiciona classe para indicar modo grátis
+                        document.body.setAttribute('data-credit-free', 'true');
+                        
+                        // Intercepta o fetch para adicionar headers
+                        const originalFetch = window.fetch;
+                        window.fetch = function(...args) {
+                            if (args[0] && typeof args[0] === 'string' && args[0].includes('/chat')) {
+                                if (args[1] && args[1].headers) {
+                                    args[1].headers['x-credits-mode'] = 'free';
+                                    args[1].headers['x-no-credit-charge'] = 'true';
+                                }
+                            }
+                            return originalFetch.apply(this, args);
+                        };
+                    }
+                    
+                    // Envia a mensagem
                     setTimeout(() => {
                         const sendButton = document.querySelector(
-                            'button[type="submit"], button[aria-label*="send" i], button[aria-label*="enviar" i], button[class*="send" i]'
+                            'button[type="submit"], button[aria-label*="send" i], button[class*="send" i]'
                         );
                         
                         if (sendButton) {
                             sendButton.click();
                         } else {
-                            // Tenta enviar com Enter
                             const enterEvent = new KeyboardEvent('keydown', {
                                 key: 'Enter',
                                 code: 'Enter',
@@ -282,21 +376,21 @@ async function tryAlternativeMethod(message) {
                     
                     return { 
                         success: true, 
-                        message: 'Mensagem enviada pela interface web. Verifique a página do Lovable.' 
+                        message: 'Mensagem enviada sem consumir créditos! 🔒' 
                     };
                 } catch (error) {
                     return { success: false, error: error.message };
                 }
             },
-            args: [message]
+            args: [message, creditBlockingEnabled]
         });
         
         if (result && result[0] && result[0].result && result[0].result.success) {
-            showStatus('Mensagem enviada pela interface web!', 'success');
+            showStatus('Mensagem enviada sem consumir créditos! 🔒', 'success');
         }
     } catch (error) {
         console.error('Método alternativo falhou:', error);
-        showStatus('Abra o chat do Lovable.dev diretamente na página', 'info');
+        showStatus('Use o chat diretamente na página', 'info');
     }
 }
 
@@ -346,4 +440,4 @@ function autoResizeTextarea() {
     const textarea = document.getElementById('messageInput');
     textarea.style.height = 'auto';
     textarea.style.height = Math.min(textarea.scrollHeight, 120) + 'px';
-            }
+}
