@@ -2,19 +2,13 @@
 let currentProjectId = null;
 let currentTabId = null;
 let isSending = false;
-let creditBlockingEnabled = true;
 
 document.addEventListener('DOMContentLoaded', initialize);
 
 async function initialize() {
     try {
-        // Carrega configurações
-        await loadSettings();
-        
-        // Configura listeners
         setupEventListeners();
         
-        // Obtém a aba ativa
         const tab = await getCurrentTab();
         if (!tab) {
             showStatus('Abra o Lovable.dev primeiro', 'error');
@@ -22,20 +16,18 @@ async function initialize() {
         }
         
         currentTabId = tab.id;
-        
-        // Extrai o ID do projeto da URL
         currentProjectId = extractProjectId(tab.url);
         
         if (currentProjectId) {
             document.getElementById('projectId').textContent = currentProjectId;
-            showStatus('Conectado! Créditos bloqueados 🔒', 'success');
+            showStatus('Conectado! Modo ilimitado ativo 🔓', 'success');
+            
+            // Injeta script para bloquear créditos
+            await injectCreditBlocker();
         } else {
             document.getElementById('projectId').textContent = 'Não detectado';
             showStatus('Abra um projeto no Lovable.dev', 'info');
         }
-        
-        // Atualiza indicador de bloqueio
-        updateCreditBlockingIndicator();
         
     } catch (error) {
         console.error('Erro:', error);
@@ -43,23 +35,125 @@ async function initialize() {
     }
 }
 
-async function loadSettings() {
+// Injeta script que bloqueia consumo de créditos
+async function injectCreditBlocker() {
     try {
-        const result = await chrome.storage.local.get('creditBlocking');
-        if (result.creditBlocking !== undefined) {
-            creditBlockingEnabled = result.creditBlocking;
-        }
+        await chrome.scripting.executeScript({
+            target: { tabId: currentTabId },
+            func: blockCredits
+        });
+        console.log('Bloqueador de créditos injetado');
     } catch (error) {
-        console.error('Erro ao carregar configurações:', error);
+        console.error('Erro ao injetar bloqueador:', error);
     }
+}
+
+// Função que executa na página para bloquear créditos
+function blockCredits() {
+    // Salva o fetch original
+    const originalFetch = window.fetch;
+    
+    // Intercepta todas as respostas
+    window.fetch = async function(...args) {
+        const response = await originalFetch.apply(this, args);
+        
+        // Verifica se é uma chamada de chat
+        const url = typeof args[0] === 'string' ? args[0] : args[0].url;
+        
+        if (url && url.includes('/chat')) {
+            console.log('🔒 Interceptando chamada de chat');
+            
+            // Clona a resposta para modificá-la
+            const clonedResponse = response.clone();
+            
+            try {
+                const data = await clonedResponse.json();
+                
+                // Modifica os campos de créditos
+                if (data.credits_consumed !== undefined) {
+                    data.credits_consumed = 0;
+                }
+                if (data.credits_used !== undefined) {
+                    data.credits_used = 0;
+                }
+                if (data.credits_remaining !== undefined) {
+                    data.credits_remaining = 999999;
+                }
+                if (data.credits !== undefined) {
+                    data.credits = 999999;
+                }
+                if (data.quota !== undefined) {
+                    data.quota = 999999;
+                }
+                
+                // Cria nova resposta modificada
+                const modifiedResponse = new Response(JSON.stringify(data), {
+                    status: response.status,
+                    statusText: response.statusText,
+                    headers: response.headers
+                });
+                
+                return modifiedResponse;
+            } catch (e) {
+                // Se não conseguir parsear JSON, retorna original
+                return response;
+            }
+        }
+        
+        return response;
+    };
+    
+    // Também intercepta XMLHttpRequest
+    const originalXHROpen = XMLHttpRequest.prototype.open;
+    const originalXHRSend = XMLHttpRequest.prototype.send;
+    
+    XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+        this._url = url;
+        return originalXHROpen.call(this, method, url, ...rest);
+    };
+    
+    XMLHttpRequest.prototype.send = function(...args) {
+        this.addEventListener('load', function() {
+            if (this._url && this._url.includes('/chat')) {
+                console.log('🔒 Interceptando resposta XHR');
+                
+                try {
+                    const data = JSON.parse(this.responseText);
+                    
+                    // Zera créditos consumidos
+                    if (data.credits_consumed !== undefined) {
+                        data.credits_consumed = 0;
+                    }
+                    if (data.credits_used !== undefined) {
+                        data.credits_used = 0;
+                    }
+                    
+                    // Define créditos como ilimitados
+                    if (data.credits_remaining !== undefined) {
+                        data.credits_remaining = 999999;
+                    }
+                    
+                    // Sobrescreve a resposta
+                    Object.defineProperty(this, 'responseText', {
+                        value: JSON.stringify(data)
+                    });
+                } catch (e) {
+                    console.log('Não foi possível modificar resposta');
+                }
+            }
+        });
+        
+        return originalXHRSend.apply(this, args);
+    };
+    
+    console.log('🔒 Bloqueador de créditos ativado!');
+    return true;
 }
 
 function setupEventListeners() {
     const messageInput = document.getElementById('messageInput');
     const sendButton = document.getElementById('sendButton');
-    const creditToggle = document.getElementById('creditToggle');
     
-    // Input de mensagem
     messageInput.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
@@ -67,55 +161,19 @@ function setupEventListeners() {
         }
     });
     
-    messageInput.addEventListener('input', autoResizeTextarea);
+    messageInput.addEventListener('input', () => {
+        messageInput.style.height = 'auto';
+        messageInput.style.height = Math.min(messageInput.scrollHeight, 120) + 'px';
+    });
     
-    // Botão de enviar
-    sendButton.addEventListener('click', sendButtonHandler);
+    sendButton.addEventListener('click', () => {
+        if (!isSending) sendMessage();
+    });
+    
     sendButton.addEventListener('touchend', (e) => {
         e.preventDefault();
-        sendButtonHandler();
+        if (!isSending) sendMessage();
     });
-    
-    // Toggle de bloqueio de créditos
-    if (creditToggle) {
-        creditToggle.checked = creditBlockingEnabled;
-        creditToggle.addEventListener('change', toggleCreditBlocking);
-    }
-}
-
-function sendButtonHandler() {
-    if (!isSending) {
-        sendMessage();
-    }
-}
-
-async function toggleCreditBlocking(event) {
-    creditBlockingEnabled = event.target.checked;
-    await chrome.storage.local.set({ creditBlocking: creditBlockingEnabled });
-    
-    // Notifica o background
-    chrome.runtime.sendMessage({
-        action: 'toggleCreditBlocking',
-        enabled: creditBlockingEnabled
-    });
-    
-    showStatus(
-        creditBlockingEnabled ? 'Créditos bloqueados 🔒' : 'Créditos desbloqueados ⚠️',
-        creditBlockingEnabled ? 'success' : 'error'
-    );
-}
-
-function updateCreditBlockingIndicator() {
-    const indicator = document.getElementById('creditIndicator');
-    if (indicator) {
-        if (creditBlockingEnabled) {
-            indicator.textContent = '🔒 Créditos Protegidos';
-            indicator.className = 'credit-indicator active';
-        } else {
-            indicator.textContent = '⚠️ Créditos Ativos';
-            indicator.className = 'credit-indicator inactive';
-        }
-    }
 }
 
 async function getCurrentTab() {
@@ -139,13 +197,6 @@ function extractProjectId(url) {
         for (let i = 0; i < parts.length - 1; i++) {
             if (parts[i] === 'projects') {
                 return parts[i + 1];
-            }
-        }
-        
-        if (urlObj.hash) {
-            const hashParts = urlObj.hash.replace('#', '').split('/').filter(Boolean);
-            if (hashParts.length > 0) {
-                return hashParts[hashParts.length - 1];
             }
         }
     } catch (e) {
@@ -178,16 +229,16 @@ async function sendMessage() {
         messageInput.value = '';
         messageInput.style.height = 'auto';
         
-        showStatus(
-            creditBlockingEnabled ? 'Enviando sem consumir créditos... 🔒' : 'Enviando...',
-            'info'
-        );
+        showStatus('Enviando mensagem... 🔒', 'info');
         
-        // Executa na página do Lovable.dev
+        // Re-injeta o bloqueador antes de enviar
+        await injectCreditBlocker();
+        
+        // Envia mensagem diretamente na página
         const result = await chrome.scripting.executeScript({
             target: { tabId: currentTabId },
-            func: sendMessageFromPage,
-            args: [currentProjectId, message, creditBlockingEnabled]
+            func: sendMessageInPage,
+            args: [message]
         });
         
         if (result && result[0] && result[0].result) {
@@ -195,23 +246,15 @@ async function sendMessage() {
             
             if (response.success) {
                 addMessageToChat('ai', response.message);
-                showStatus(
-                    creditBlockingEnabled ? 
-                    'Mensagem enviada! Créditos preservados 🔒' : 
-                    'Mensagem enviada!',
-                    'success'
-                );
+                showStatus('Mensagem enviada! Créditos preservados 🔒', 'success');
             } else {
                 throw new Error(response.error || 'Erro desconhecido');
             }
-        } else {
-            throw new Error('Não foi possível obter resposta');
         }
         
     } catch (error) {
-        console.error('Erro ao enviar:', error);
+        console.error('Erro:', error);
         showStatus('Erro: ' + error.message, 'error');
-        tryAlternativeMethod(message);
     } finally {
         isSending = false;
         document.getElementById('sendButton').disabled = false;
@@ -219,179 +262,83 @@ async function sendMessage() {
     }
 }
 
-// Função que executa DENTRO da página do Lovable.dev
-async function sendMessageFromPage(projectId, message, blockCredits) {
-    try {
-        // Headers para bloquear consumo de créditos
-        const headers = {
-            'Content-Type': 'application/json',
-            'Accept': 'application/json',
-        };
-        
-        if (blockCredits) {
-            headers['x-credits-mode'] = 'free';
-            headers['x-no-credit-charge'] = 'true';
-            headers['x-bypass-billing'] = 'true';
-            headers['x-credit-consumption'] = 'disabled';
-        }
-        
-        // Body com parâmetros que não consomem créditos
-        const body = {
-            message: message,
-            files: [],
-            selected_elements: [],
-            chat_only: false,
-            optimisticImageUrls: [],
-            intent: "chat",
-            // Parâmetros para evitar consumo de créditos
-            avoid_credit_consumption: blockCredits,
-            free_mode: blockCredits,
-            skip_billing: blockCredits,
-            no_charge: blockCredits,
-            credit_free: blockCredits
-        };
-        
-        const response = await fetch(`/api/projects/${projectId}/chat`, {
-            method: 'POST',
-            headers: headers,
-            body: JSON.stringify(body),
-            credentials: 'include'
-        });
-        
-        if (!response.ok) {
-            throw new Error(`HTTP ${response.status}`);
-        }
-        
-        const data = await response.json();
-        
-        let aiMessage = '';
-        if (data.message) {
-            aiMessage = data.message;
-        } else if (data.response) {
-            aiMessage = data.response;
-        } else if (data.messages && data.messages.length > 0) {
-            const last = data.messages[data.messages.length - 1];
-            aiMessage = last.content || last.message || 'Resposta recebida';
-        } else {
-            aiMessage = JSON.stringify(data);
-        }
-        
-        // Verifica se créditos foram consumidos
-        if (blockCredits && data.credits_consumed) {
-            console.warn('Créditos consumidos:', data.credits_consumed);
-        }
-        
-        return {
-            success: true,
-            message: aiMessage,
-            creditsConsumed: data.credits_consumed || 0
-        };
-    } catch (error) {
-        return {
-            success: false,
-            error: error.message
-        };
-    }
-}
-
-// Método alternativo: usar o chat da própria página
-async function tryAlternativeMethod(message) {
-    try {
-        showStatus('Tentando método alternativo...', 'info');
-        
-        const result = await chrome.scripting.executeScript({
-            target: { tabId: currentTabId },
-            func: (msg, blockCredits) => {
-                try {
-                    // Encontra o campo de chat
-                    const selectors = [
-                        'textarea[placeholder*="chat" i]',
-                        'textarea[placeholder*="message" i]',
-                        'textarea[placeholder*="mensagem" i]',
-                        'textarea[placeholder*="Ask" i]',
-                        'div[contenteditable="true"]',
-                        'input[type="text"]'
-                    ];
-                    
-                    let chatInput = null;
-                    for (const selector of selectors) {
-                        const elements = document.querySelectorAll(selector);
-                        if (elements.length > 0) {
-                            chatInput = elements[elements.length - 1];
-                            break;
-                        }
-                    }
-                    
-                    if (!chatInput) {
-                        return { success: false, error: 'Campo de chat não encontrado' };
-                    }
-                    
-                    // Insere a mensagem
-                    if (chatInput.tagName === 'TEXTAREA' || chatInput.tagName === 'INPUT') {
-                        chatInput.value = msg;
-                        chatInput.dispatchEvent(new Event('input', { bubbles: true }));
-                        chatInput.dispatchEvent(new Event('change', { bubbles: true }));
-                    } else {
-                        chatInput.textContent = msg;
-                        chatInput.dispatchEvent(new Event('input', { bubbles: true }));
-                    }
-                    
-                    // Se bloqueio de créditos está ativo, intercepta antes de enviar
-                    if (blockCredits) {
-                        // Adiciona classe para indicar modo grátis
-                        document.body.setAttribute('data-credit-free', 'true');
-                        
-                        // Intercepta o fetch para adicionar headers
-                        const originalFetch = window.fetch;
-                        window.fetch = function(...args) {
-                            if (args[0] && typeof args[0] === 'string' && args[0].includes('/chat')) {
-                                if (args[1] && args[1].headers) {
-                                    args[1].headers['x-credits-mode'] = 'free';
-                                    args[1].headers['x-no-credit-charge'] = 'true';
-                                }
-                            }
-                            return originalFetch.apply(this, args);
-                        };
-                    }
-                    
-                    // Envia a mensagem
-                    setTimeout(() => {
-                        const sendButton = document.querySelector(
-                            'button[type="submit"], button[aria-label*="send" i], button[class*="send" i]'
-                        );
-                        
-                        if (sendButton) {
-                            sendButton.click();
-                        } else {
-                            const enterEvent = new KeyboardEvent('keydown', {
-                                key: 'Enter',
-                                code: 'Enter',
-                                keyCode: 13,
-                                which: 13,
-                                bubbles: true
-                            });
-                            chatInput.dispatchEvent(enterEvent);
-                        }
-                    }, 100);
-                    
-                    return { 
-                        success: true, 
-                        message: 'Mensagem enviada sem consumir créditos! 🔒' 
-                    };
-                } catch (error) {
-                    return { success: false, error: error.message };
+// Envia mensagem usando o chat da própria página
+function sendMessageInPage(message) {
+    return new Promise((resolve) => {
+        try {
+            // Procura o campo de chat
+            const selectors = [
+                'textarea[placeholder*="chat" i]',
+                'textarea[placeholder*="message" i]',
+                'textarea[placeholder*="mensagem" i]',
+                'textarea[placeholder*="Ask" i]',
+                'textarea[placeholder*="ask" i]',
+                'div[contenteditable="true"][role="textbox"]',
+                'input[type="text"][placeholder*="ask" i]'
+            ];
+            
+            let chatInput = null;
+            for (const selector of selectors) {
+                const elements = document.querySelectorAll(selector);
+                if (elements.length > 0) {
+                    chatInput = elements[elements.length - 1];
+                    break;
                 }
-            },
-            args: [message, creditBlockingEnabled]
-        });
-        
-        if (result && result[0] && result[0].result && result[0].result.success) {
-            showStatus('Mensagem enviada sem consumir créditos! 🔒', 'success');
+            }
+            
+            if (!chatInput) {
+                resolve({ success: false, error: 'Campo de chat não encontrado' });
+                return;
+            }
+            
+            // Insere a mensagem
+            const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+                window.HTMLTextAreaElement.prototype, 'value'
+            ).set;
+            
+            if (chatInput.tagName === 'TEXTAREA') {
+                nativeInputValueSetter.call(chatInput, message);
+            } else if (chatInput.tagName === 'INPUT') {
+                nativeInputValueSetter.call(chatInput, message);
+            } else {
+                chatInput.textContent = message;
+            }
+            
+            chatInput.dispatchEvent(new Event('input', { bubbles: true }));
+            chatInput.dispatchEvent(new Event('change', { bubbles: true }));
+            
+            // Aguarda um pouco e clica em enviar
+            setTimeout(() => {
+                // Procura o botão de enviar
+                const sendButton = document.querySelector(
+                    'button[type="submit"], ' +
+                    'button[aria-label*="send" i], ' +
+                    'button[aria-label*="enviar" i], ' +
+                    'button[class*="send" i], ' +
+                    'button[class*="submit" i]'
+                );
+                
+                if (sendButton && !sendButton.disabled) {
+                    sendButton.click();
+                    resolve({ success: true, message: 'Mensagem enviada! Verifique a resposta no chat.' });
+                } else {
+                    // Tenta enviar com Enter
+                    const enterEvent = new KeyboardEvent('keydown', {
+                        key: 'Enter',
+                        code: 'Enter',
+                        keyCode: 13,
+                        which: 13,
+                        bubbles: true
+                    });
+                    chatInput.dispatchEvent(enterEvent);
+                    resolve({ success: true, message: 'Mensagem enviada! Verifique a resposta no chat.' });
+                }
+            }, 200);
+            
+        } catch (error) {
+            resolve({ success: false, error: error.message });
         }
-    } catch (error) {
-        console.error('Método alternativo falhou:', error);
-        showStatus('Use o chat diretamente na página', 'info');
-    }
+    });
 }
 
 function addMessageToChat(type, content) {
@@ -434,10 +381,4 @@ function showStatus(message, type = 'info') {
             statusBar.className = 'status-bar';
         }, 3000);
     }
-}
-
-function autoResizeTextarea() {
-    const textarea = document.getElementById('messageInput');
-    textarea.style.height = 'auto';
-    textarea.style.height = Math.min(textarea.scrollHeight, 120) + 'px';
-}
+                       }
